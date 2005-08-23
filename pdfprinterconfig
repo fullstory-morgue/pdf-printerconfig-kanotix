@@ -1,0 +1,339 @@
+#!/bin/bash
+#
+# (C) Kurt Pfeifle <kpfeifle@danka.de>, 2004
+# License: GPL
+#set -x
+
+# -----------------------------------------------------------------------------
+# ----------- various variable definitions ------------------------------------
+DIALOG="dialog"
+[ -n "$DISPLAY" ] && [ -x /usr/bin/Xdialog ] && DIALOG="Xdialog"
+PDFSERVICE="pdfservice"
+#PDFDIR="/home/knoppix/PDFs"
+
+
+# -----------------------------------------------------------------------------
+# ----------- Check for Live-CD or HD installed system ------------------------
+if [ ! -d /KNOPPIX/etc ] ; then 
+	$DIALOG --msgbox "FATAL ERROR!\nThis Kanotix script must only be run on a Live-CD system,\nnot on a regular system.\nAborting." 0 0
+	exit 1
+fi
+
+
+# -----------------------------------------------------------------------------
+# ----------- LANG and LOCALE -------------------------------------------------
+[ -f /etc/sysconfig/i18n ] && . /etc/sysconfig/i18n
+
+[ "`id -u`" != "0" ] && exec sudo "$0" "$@"
+
+
+
+# -----------------------------------------------------------------------------
+# --------- various function definitions --------------------------------------
+function start_cups() 
+{
+	# Check if CUPS is running.
+	/usr/bin/lpstat -r 2> /dev/null 1> /dev/null;
+	CUPS_IS_RUNNING=$( echo ${?} );
+	# If CUPS is not running, start it.
+	[ x"${CUPS_IS_RUNNING}" = x"0" ] || /etc/init.d/cupsys start;
+}
+
+function initial_dialog()
+{
+	# Ask user if he wants to set up Knoppix PDF Creation service.
+	$DIALOG --default-no --title "$TITLE" --yesno "${MESSAGE_CREATE}" 0 0; # --default-no
+	# capture if user clicked "Cancel"
+	EXIT=${?};
+	# abort if user clicked "Cancel"
+	[ x"${EXIT}" = x"1" ] && exit 0;
+}
+
+function ask_for_printername()
+{
+	# Ask user if he agrees to suggested "pdfservice" as the printername
+	# Otherwise let him decide another one.
+	$DIALOG --title "$TITLE" --inputbox "${MESSAGE_PRINTERNAME}" 0 0 2> printername;
+	# capture if user clicked "Cancel"
+	EXIT=${?};
+	export PRINTERNAME=$( cat printername );
+	rm printername;
+	# abort if user clicked "Cancel"
+	[ x"${EXIT}" = x"1" ] && exit 0;
+	[ x"${PRINTERNAME}" = x"" ] && export PRINTERNAME="pdfservice" ;
+}
+
+function ask_for_pdfdir()
+{
+	# Ask user if he agrees to suggested "/home/knoppix/PDFs/" as
+	# the $PDFDIR. Otherwise let him decide another one.
+	$DIALOG --title "$TITLE" --inputbox "${MESSAGE_PDFDIR}" 0 0 2> pdfdir;
+	# capture if user clicked "Cancel"
+	EXIT=${?};
+	export PDFDIR=$( cat pdfdir );
+	rm pdfdir;
+	# abort if user clicked "Cancel"
+	[ x"${EXIT}" = x"1" ] && exit 0;
+}
+
+function message_final()
+{
+	# Display message about PDF Service Installation 
+	$DIALOG --title "${TITLE}" --msgbox "${MESSAGE_FINAL}" 0 0;
+}
+
+function message_error_exportdriver()
+{
+	# Display message about PDF driver export failure;
+	$DIALOG --title "${TITLE}" --msgbox "${MESSAGE_ERROR_EXPORTDRIVER}" 0 0;
+}
+
+function message_final_samba()
+{
+	# Display message about PDF Service sharing via Samba
+	$DIALOG --title "${TITLE}" --msgbox "${MESSAGE_FINAL_SAMBA}" 0 0;
+}
+
+function create_pdfdir()
+{
+	# Check for $PDFDIR and create it if required
+	# Go to ~knoppix to set $PWD to ~knoppix, in case the user doesn't insert an absolute path
+	cd ~knoppix;
+	# PDFDIR default is /home/knoppix/PDFs if empty; set "sticky bit" to $PDFDIR for improved security
+	[ x"${PDFDIR}" = x"" ] && export PDFDIR="/home/knoppix/PDFs" && chmod 1777 /home/knoppix/PDFs;
+	export PDFFILENAME=`basename ${PDFDIR}`;
+	export PDFDIRNAME=`dirname ${PDFDIR}`;
+	export PDFDIR="${PDFDIRNAME}/${PDFFILENAME}";
+	[ -d ${PDFDIR} ] || mkdir -p ${PDFDIR} && chmod 1777 ${PDFDIR};
+	cd ${PDFDIR}; export PDFDIR="${PWD}"; cd -;
+}
+
+function create_pdfprinter()
+{
+	# Create a CUPS printer with correct PPD, location string, 
+	# description string and pdf-backend
+	lpadmin -p ${PRINTERNAME} \
+	        -E \
+                -v pdf:${PDFDIR} \
+                -L "${LOCATION}" \
+                -D "${DESCRIPTION}" \
+                -m PS2PDF.ppd ;
+}
+
+function ask_for_sambasupport()
+{
+	# Ask if the user wants to share out the PDF service to Windows clients
+	$DIALOG --default-no --title "$TITLE" --yesno "${MESSAGE_SAMBASHARE}" 0 0 ;  # --default-no
+	SAMBASUPPORT="${?}";
+	# capture if user clicked "No"
+	EXIT=${SAMBASUPPORT};
+	# NOTE: if "0", the answer was "Yes" and hence we do create Samba support
+	#       further below
+	# abort if user clicked "No"
+	[ x"${EXIT}" = x"1" ] && exit 0;
+}
+
+function check_for_running_smbd()
+{
+	# Check if there is a running smbd
+	# "smbcontrol smbd ping"; <-- doesn't work unfortunately
+	ps aux |grep smbd |grep -v grep;
+	SMBD_IS_RUNNING=${?};
+}
+
+function check_for_sambaconfig()
+{
+	# Check if the user had previously configured Samba
+	SAMBACONFIG="no"; # initialize with "no"
+	[ -L /etc/samba/smb.conf ] || SAMBACONFIG="yes";
+}
+
+function create_sambaconfig()
+{
+	# If there is no smb.conf, call the Samba-configuring Knoppix script.
+	[ x"${SMBD_IS_RUNNING}" = x"0" ] || /usr/sbin/sambastart;
+}
+
+
+function create_sambashare()
+{
+	SMBCONF=/etc/samba/smb.conf;
+	# Create a Samba share named "PDFs" in whatever path the user did chose
+	# first delete previously configured "PDFs" share that was created by this script 
+	cat ${SMBCONF}|sed -e '/#BEGIN_PDF_SHARE_DEF/,/#END_PDF_SHARE_DEF/ d' > ${SMBCONF};
+cat >> ${SMBCONF} <<EOF
+#BEGIN_PDF_SHARE_DEF
+[PDFs]
+  comment = PDF files generated by Kanotix printer acting as 'pdfservice'
+  browseable = yes
+  path = ${PDFDIR}
+  writeable = yes
+  create mode = 0600
+#END_PDF_SHARE_DEF
+EOF
+}
+
+
+function ask_for_sambapasswd()
+{
+	# Ask the user for his Samba-Password
+	$DIALOG --title "$TITLE" --passwordbox "${MESSAGE_SAMBAPASSWD}" 0 0 2> smbpwd;
+	# capture if user clicked "No"
+	EXIT=${?};
+	SMBPASSWD=`cat smbpwd`;
+	rm smbpwd;
+	# abort if user clicked "No"
+	[ x"${EXIT}" = x"1" ] && exit 0;
+
+}
+ 
+function share_printerdriver()
+{
+	# Share printer driver to Windows Clients using "smbclient" and "rpcclient"
+	mkdir -p /var/lib/samba/printers/WIN40;
+	mkdir -p /var/lib/samba/printers/W32X86;
+	chown -R knoppix.knoppix /var/lib/samba/printers;
+	# Next command to work around a bug in Samba which does recognize newly
+	# created printers only after restart....
+	/etc/init.d/samba start;
+	kill -HUP $( pidof smbd ) ;
+	smbclient //localhost/print\$ -N \
+	                              -U"knoppix%${SMBPASSWD}" \
+				      -c "mkdir W32X86;\
+				      put /etc/cups/ppd/${PRINTERNAME}.ppd W32X86/${PRINTERNAME}.ppd;\
+				      put /usr/share/cups/drivers/cupsdrv5.dll W32X86/cupsdrv5.dll;\
+				      put /usr/share/cups/drivers/cupsui5.dll W32X86/cupsui5.dll;\
+				      put /usr/share/cups/drivers/cups5.hlp W32X86/cups5.hlp";
+	rpcclient -Uknoppix%${SMBPASSWD} \
+	          -c "adddriver \"Windows NT x86\" \
+	          \"${PRINTERNAME}:cupsdrv5.dll:${PRINTERNAME}.ppd:cupsui5.dll:cups5.hlp:NULL:RAW:NULL\"\
+		  ${PRINTERNAME}" \
+	           localhost
+	rpcclient -Uknoppix%${SMBPASSWD} \
+	          -c "setdriver ${PRINTERNAME} ${PRINTERNAME}" \
+	           localhost;
+	[ x"${?}" = x"0" ] && message_final_samba || message_error_exportdriver;
+}
+
+# -----------------------------------------------------------------------------
+# ----------- various string definitions --------------------------------------
+read_stringdefinitions()
+{
+case "$LANGUAGE" in
+	de*) MESSAGE1="\nPasswort für den CUPS-Administrator 'knoppix' eingeben"\n\n;
+             TITLE="Einrichten des KANOTIX PDF-Dienstes";
+	     LOCATION='Fertige PDFs liegen in '"${PDFDIR}"' ';
+	     DESCRIPTION="Virtueller CUPS-Drucker zur Erzeugung von PDFs";
+             MESSAGE_CREATE="\n\
+	     Soll ein 'Drucker' namens 'pdfservice' o.ä. eingerichtet werden, \n\
+	     so dass dieser auch für Linux/UNIX-Fremdrechner zur Erzeugung \n\
+	     von PDFs zugänglich ist?\n\n" ;
+	     MESSAGE_SAMBAPASSWD="\n\
+	     Sie müssen hier das Samba-Passwort des Benutzers 'knoppix' eingeben:\n\n";
+	     MESSAGE_PRINTERNAME="\n\
+	     PDFs werden von einem virtuellen CUPS-Drucker generiert.\n\
+	     Dieser Drucker braucht einen Namen. Wir schlagen vor, \"pdfservice\"\n\
+	     zu verwenden. Tragen Sie einen anderen Namen ein, falls Sie dies wünschen.\n\
+	     (wenn Sie es leer lassen, werden wir 'pdfservice' verwenden).\n\n" ;
+	     MESSAGE_PDFDIR="\n\
+	     Fertige PDFs werden in ein eigenes Verzeichnis geschrieben.\n\
+	     Wir schlagen vor, \"/home/knoppix/PDFs\" zu verwenden. Andernfalls\n\
+	     tragen Sie hier ein Verzeichnis Ihrer Wahl mit vollem Pfad ein\n\
+	     (wir werden '/home/knoppix/PDFs' verwenden, wenn Sie es leer lassen).\n\n\
+	     Das Verzeichnis wird automatisch angelegt, falls es noch nicht existiert:\n"
+	     MESSAGE_SAMBASHARE="\n\
+	     Soll der PDF-Drucker mittels Samba freigegeben werden? \n\
+	     Wenn Sie hier \"OK\" sagen können auch Windows-Fremdrechner \n\
+	     den PDF-Drucker zur Erzeugung von PDFs verwenden.\n\
+	     Die Windows-Clients können den richtigen Treiber automatisch\n\
+	     per \"Point'n'Print\" installieren.\n\n" ;
+	     MESSAGE_FINAL="\n\
+	     --> Neuer Drucker (mit dem von Ihnen gewählten Namen \"${PRINTERNAME}\") ist eingerichtet. \n\
+	     --> Alle erzeugten PDFs werden im angegebenen Verzeichnis \"${PDFDIR}\"  gespeichert.\n\
+	     --> Das Namens-Schema der PDF-Dateien ist \"<Job-Titel>-<Druck-Zeitpunkt>-<Benutzer-Name>.pdf\".\n\n";
+	     MESSAGE_ERROR_EXPORTDRIVER="\n
+	     FATALER FEHLSCHLAG!\n\n\
+	     Export des PDF-Druckertreibers in die Samba [print$]-Freigabe scheiterte.\n\
+	     Mögliche Ursache: falsch getipptes Samba Passwort? \n\n\
+	     Mögliche Abhilfe: nochmals von vorne versuchen."
+	     MESSAGE_FINAL_SAMBA="\n\
+	     --> Neuer Drucker (mit dem von Ihnen gewählten Namen \"${PRINTERNAME}\") ist eingerichtet. \n\n\
+	     --> Alle erzeugten PDFs werden im angegebenen Verzeichnis \"${PDFDIR}\" gespeichert.\n\n\
+	     --> Das Namens-Schema der PDF-Dateien ist '<Job-Titel>-<Druck-Zeitpunkt>-<Benutzer-Name>.pdf'.\n\n\
+	     --> Windows-Clients können den PDF-Drucker \"${PRINTERNAME}\" samt Treiber via \"Point'n'Print\" installieren.\n\n\
+	     --> Windows-Clients können auf dieses Verzeichnis mittels UNC-Pfad '\\\\knoppix\\PDFs' zugreifen,\n\
+	     um ihre PDFs abzuholen.\n\n"; ;;
+	*)   MESSAGE1="\nType password for CUPS printer administrator 'knoppix':\n\n";
+	     TITLE="Configure a KANOTIX PDF Creation Service";
+	     LOCATION="Ready-made PDFs are saved to \"${PDFDIR}\"";
+	     DESCRIPTION="Virtual CUPS Printer to generate PDF files";
+	     MESSAGE_PRINTERNAME="\n\
+	     PDFs will be generated by a virtual CUPS printer.\n\
+	     This printer needs a name. We suggest to use \"pdfservice\"\n\
+	     Type in a different name, if you so desire.\n\
+	     (if you leave it empty, we will use 'pdfservice'.)\n\n" ;
+             MESSAGE_CREATE="\n\
+	     Do you want to create a 'printer' named 'pdfservice' (or similar), \n\
+	     which can be accessed by other Linux/UNIX workstations to generate PDFs?\n\n" ;
+	     MESSAGE_SAMBAPASSWD="\n\
+	     Please type in the SAMBA password for user 'knoppix':\n\n";
+	     MESSAGE_PDFDIR="\n\
+	     Completed PDFs will be saved to a separate directory.\n\
+	     We suggest to use \"/home/knoppix/PDFs\". If you wish to\n\
+	     use another directory, insert it here with the full path\n\
+	     (we will use '/home/knoppix/PDFs' if you leave it empty).\n\n\
+	     The directory will be automatically created, if it doesn't exist:\n";
+             MESSAGE_SAMBASHARE="\n\
+	     Do you want to share this 'pdfservice' via Samba?\n\
+	     If you confirm this with \"OK\" all MS Windows workstations\n\
+	     will be able to utilize the PDF printer to generate PDFs.\n\
+	     They will be able to auto-install the driver via \"Point'n'Print\".\n\n"; 
+	     MESSAGE_FINAL="\n\
+	     --> New printer (with the name \"${PRINTERNAME}\" you selected) has been created. \n\n\
+	     --> All generated PDFs will be saved to the directory \"${PDFDIR}\" you selected.\n\n\
+	     --> The name-scheme of the PDFs is '<job-title>-<print-time>-<user-name>.pdf'. \n\n" ;
+	     MESSAGE_ERROR_EXPORTDRIVER="\n
+	     FATAL ERROR!\n\n\
+	     Exporting PDF Printer driver to Samba's [print$] share failed.\n\
+	     Possible cause: a wrongly typed-in Samba password. \n\n\
+	     Possible cure: try again from start."
+	     MESSAGE_FINAL_SAMBA="\n\
+	     --> New printer (with the name \"${PRINTERNAME}\" you selected) has been created. \n\n\
+	     --> All generated PDFs will be saved to the directory \"${PDFDIR}\" you selected.\n\n\
+	     --> The name-scheme of the PDFs is '<job-title>-<print-time>-<user-name>.pdf'. \n\n\
+	     --> Windows clients may install the driver via \"Point'n'Print\".\n\n\
+	     --> Windows clients may access resulting PDFs via UNC path '\\\\knoppix\\PDFs'\n\
+	     to retrieve their PDFs.\n\n"; ;;
+esac
+}
+
+# -----------------------------------------------------------------------------
+# ----------- the real programm.... -------------------------------------------
+
+
+read_stringdefinitions;
+initial_dialog;
+# Check if CUPS is running. If not, start it.
+start_cups;
+ask_for_pdfdir;
+ask_for_printername;
+create_pdfdir;
+# here was a problem: $PDFDIR was not expanded inside the $LOCATION variable;
+# at the time $LOCATION is first initialized $PDFDIR is still empty. Therefor
+# I call the read_stringdefinitions function again. I don't know if there is
+# a more elegant fix other than splitting the read_stringdefinitions into 2
+# different functions.... [FIXME]
+read_stringdefinitions;
+create_pdfprinter;
+message_final; 
+ask_for_sambasupport;
+[ x"${SAMBASUPPORT}" = x"1" ] && exit 0;
+check_for_running_smbd;
+check_for_sambaconfig;
+[ x"${SAMBACONFIG}" = x"no" ] && create_sambaconfig;
+create_sambashare;
+ask_for_sambapasswd;
+share_printerdriver;
+#show_final_info;
+
+

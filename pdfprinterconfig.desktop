@@ -1,0 +1,6 @@
+[Desktop Entry]
+Exec=/usr/bin/pdfprinterconfig
+Name[de]=PDF Printer einrichten
+Name=Setup PDF Printer
+Icon=printmgr
+Type=Application

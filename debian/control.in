@@ -1,0 +1,13 @@
+Source: pdf-printerconfig-kanotix
+Section: graphics
+Priority: optional
+Maintainer: Stefan Lippers-Hollmann <s.l-h@gmx.de>
+Build-Depends-Indep: @cdbs@
+Standards-Version: 3.6.2
+
+Package: pdf-printerconfig-kanotix
+Architecture: all
+Depends: kdeprint, dialog, sambastart-kanotix, smbconf-pfeifle
+Suggests: xdialog
+Description: sets up and pdf printer service 
+ provides an pdf distiller through samba and cups.
